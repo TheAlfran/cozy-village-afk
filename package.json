@@ -1,0 +1,62 @@
+{
+  "name": "cozy-village-afk",
+  "displayName": "Cozy Village AFK",
+  "description": "A cozy fishing idle game inside Visual Studio Code.",
+  "version": "0.2.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:cozyVillage.openGame",
+    "onView:cozyVillage.gameView"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cozyVillage",
+          "title": "Cozy Village",
+          "icon": "media/village.svg"
+        }
+      ]
+    },
+    "views": {
+      "cozyVillage": [
+        {
+          "type": "webview",
+          "id": "cozyVillage.gameView",
+          "name": "Village"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cozyVillage.openGame",
+        "title": "Open Game",
+        "category": "Cozy Village"
+      }
+    ]
+  },
+  "scripts": {
+    "clean": "node esbuild.mjs --clean",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "vscode:prepublish": "npm run check && npm run test && npm run compile",
+    "package:vsix": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}

@@ -1,0 +1,75 @@
+:root {
+  color-scheme: dark;
+  --ink: #f7e7c3;
+  --panel: #211f27ee;
+  --edge: #6f563a;
+  --gold: #f6c453;
+  --green: #75b86b;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #16151a; color: var(--ink); overflow: hidden; }
+button { border: 2px solid #8d714d; border-radius: 4px; background: #40372f; color: var(--ink); padding: 8px 13px; font: 600 13px inherit; cursor: pointer; box-shadow: 0 3px 0 #171317; }
+button:hover:not(:disabled) { filter: brightness(1.18); transform: translateY(-1px); }
+button:active:not(:disabled) { transform: translateY(2px); box-shadow: none; }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: #39734c; border-color: #78b56e; }
+button.danger { color: #e9b3a4; border-color: #754a46; }
+button.wide { width: 100%; margin-top: 10px; }
+kbd { background: #17151b; border: 1px solid #777; border-radius: 3px; padding: 1px 4px; margin-left: 6px; }
+
+#app { height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }
+#hud { min-height: 58px; display: flex; align-items: center; gap: 18px; padding: 9px 14px; background: #29252b; border-bottom: 3px solid #4d3c30; }
+.brand { font-family: Georgia, serif; font-weight: 800; font-size: 18px; white-space: nowrap; color: #ffe1a3; }
+.brand span { color: var(--green); }
+.stats { display: flex; align-items: center; gap: 7px; flex: 1; flex-wrap: wrap; }
+.stats span { background: #17151a; border: 1px solid #50463d; border-radius: 3px; padding: 5px 8px; font-size: 12px; }
+.toolbar { display: flex; gap: 7px; }
+#gameShell { position: relative; min-height: 0; display: grid; place-items: center; background: #0d1110; overflow: hidden; }
+#gameCanvas { display: block; width: min(100%, calc((100vh - 104px) * 1.7778)); height: auto; max-height: 100%; image-rendering: pixelated; outline: none; box-shadow: 0 0 36px #000; }
+#prompt { position: absolute; bottom: 24px; left: 50%; translate: -50% 0; background: #17151ae8; border: 2px solid #d1ad68; padding: 8px 16px; border-radius: 4px; opacity: 0; transition: opacity .15s; font-weight: 700; pointer-events: none; }
+#prompt.visible { opacity: 1; }
+#toast { position: absolute; top: 18px; left: 50%; translate: -50% -15px; opacity: 0; background: #202023ed; border: 2px solid var(--gold); padding: 10px 18px; transition: .2s; pointer-events: none; }
+#toast.visible { opacity: 1; translate: -50% 0; }
+.panel { background: var(--panel); border: 3px solid var(--edge); border-radius: 6px; box-shadow: 0 10px 50px #000b; padding: 16px; }
+.hidden { display: none !important; }
+#fishingControls { position: absolute; left: 50%; bottom: 18px; translate: -50% 0; width: min(650px, calc(100% - 30px)); text-align: center; }
+.panel h2, .panel p { margin: 0 0 8px; }
+.buttonRow { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+.meter { height: 8px; background: #111; margin: 10px 0 14px; overflow: hidden; border-radius: 3px; }
+#fishingMeter { height: 100%; width: 0; background: var(--green); }
+.modal { position: absolute; z-index: 5; width: min(610px, calc(100% - 30px)); max-height: calc(100% - 30px); overflow: auto; left: 50%; top: 50%; translate: -50% -50%; }
+.panelHeader { display: flex; align-items: start; justify-content: space-between; border-bottom: 1px solid #675541; margin-bottom: 10px; padding-bottom: 6px; }
+.panelHeader button { padding: 3px 10px; font-size: 20px; }
+.fishRow { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; padding: 9px; border-bottom: 1px solid #423a34; }
+.fishMeta { color: #bdb0a0; font-size: 12px; }
+.rarity-Common { color: #ddd; }.rarity-Uncommon { color: #7ee081; }.rarity-Rare { color: #6cb6ff; }.rarity-Epic { color: #cf85ff; }.rarity-Legendary { color: #ffc85d; }
+footer { display: flex; justify-content: center; gap: 22px; padding: 6px; min-height: 31px; background: #211e23; color: #a99e91; font-size: 12px; }
+
+@media (max-width: 760px) {
+  #hud { gap: 8px; }.stats span:nth-child(2), .stats span:nth-child(3) { display: none; }
+  footer { gap: 10px; }.toolbar button { padding-inline: 8px; }
+}
+
+@media (max-width: 500px) {
+  body { overflow: auto; }
+  #app { min-height: 100vh; height: auto; display: flex; flex-direction: column; }
+  #hud { align-items: stretch; flex-direction: column; gap: 7px; padding: 9px; }
+  .brand { display: block; text-align: center; font-size: 16px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .stats span { padding: 4px; text-align: center; }
+  .stats span:nth-child(2), .stats span:nth-child(3) { display: block; }
+  .toolbar { display: grid; grid-template-columns: 1fr 1fr; }
+  #gameShell { flex: 1; min-height: 310px; display: flex; flex-direction: column; justify-content: flex-start; overflow: visible; }
+  #gameCanvas { width: 100%; height: auto; flex: 0 0 auto; }
+  #prompt { bottom: auto; top: 155px; max-width: calc(100% - 16px); padding: 6px 9px; font-size: 11px; white-space: nowrap; }
+  #toast { top: 8px; width: calc(100% - 16px); text-align: center; font-size: 12px; padding: 7px; }
+  #fishingControls { position: static; translate: none; width: 100%; border-width: 2px 0 0; border-radius: 0; padding: 10px; }
+  #fishingControls h2 { font-size: 17px; }
+  .buttonRow { display: grid; grid-template-columns: 1fr; }
+  .modal { position: absolute; top: 8px; width: calc(100% - 16px); max-height: calc(100% - 16px); padding: 10px; }
+  .fishRow { grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+  .fishRow button { grid-column: 1 / -1; }
+  footer { flex-wrap: wrap; padding: 7px 4px; }
+}
