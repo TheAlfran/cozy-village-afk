@@ -19,4 +19,9 @@ export class InputManager {
     this.pressed.delete(key);
     return found;
   }
+
+  clear(): void {
+    this.held.clear();
+    this.pressed.clear();
+  }
 }

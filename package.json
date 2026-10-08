@@ -1,14 +1,16 @@
 {
   "name": "cozy-village-afk",
   "displayName": "Cozy Village AFK",
-  "description": "A cozy fishing idle game inside Visual Studio Code.",
-  "version": "0.2.0",
+  "description": "A Phaser 3 cozy fishing idle game inside Visual Studio Code.",
+  "version": "0.9.2",
   "publisher": "local",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onCommand:cozyVillage.openGame",
     "onView:cozyVillage.gameView"
@@ -38,6 +40,11 @@
         "command": "cozyVillage.openGame",
         "title": "Open Game",
         "category": "Cozy Village"
+      },
+      {
+        "command": "cozyVillage.openFullscreen",
+        "title": "Open Fullscreen Game",
+        "category": "Cozy Village"
       }
     ]
   },
@@ -58,5 +65,8 @@
     "esbuild": "^0.25.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0"
   }
 }

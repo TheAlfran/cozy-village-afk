@@ -2,11 +2,32 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "type": "npm",
-      "script": "compile",
-      "problemMatcher": ["$tsc"],
+      "label": "Cozy Village: Watch",
+      "type": "shell",
+      "command": "npm.cmd",
+      "args": ["run", "watch"],
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "cozy-village-esbuild",
+        "pattern": {
+          "regexp": "^(.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^\\[watch\\] starting$",
+          "endsPattern": "^\\[watch\\] ready$"
+        }
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "dedicated",
+        "showReuseMessage": false
+      },
       "group": "build",
-      "label": "npm: compile"
+      "runOptions": {
+        "instanceLimit": 1
+      }
     }
   ]
 }

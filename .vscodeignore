@@ -8,3 +8,4 @@ esbuild.mjs
 scripts/**
 tsconfig.json
 releases/**
+media/player-spritesheet.png
