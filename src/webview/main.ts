@@ -1,23 +1,36 @@
 import './styles.css';
 import {
   FISH,
+  BAITS,
   EQUIPMENT,
+  EQUIPMENT_SLOTS,
+  GEAR_SETS,
+  MATERIALS,
+  MAX_ENHANCEMENT,
+  RODS,
   createDefaultSave,
   sanitizeSave,
   type FishDefinition,
   type FishId,
+  type BaitId,
   type EquipmentItemId,
+  type EquipmentDefinition,
+  type EnhanceableId,
+  type MaterialId,
+  type GearSetId,
+  type RodId,
   type GameSaveV1,
   type HostToWebviewMessage,
   type WebviewToHostMessage,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  MAPS,
 } from '../shared/model.js';
-import { awardCatch, chooseFish, inventoryCount, normalizedMovement, sellAll, sellFish } from '../shared/rules.js';
-import { FishingSession } from './fishing.js';
+import { activeBait, awardCatch, buyBait, buyEquipment, buyGearSet, buyRod, chooseFish, consumeBait, effectiveInventoryCapacity, effectiveRodStats, enhanceItem, enhancementChance, enhancementCost, equipmentBonus, equipGearSet, equipRod, gearSetItems, inventoryCount, normalizedMovement, selectBait, sellAll, sellFish } from '../shared/rules.js';
+import { catchZoneWidth, escapeWindowMs, FishingSession, markerCycleMs } from './fishing.js';
 import { InputManager } from './input.js';
 import { CozyPhaserGame } from './phaserGame.js';
-import { BUILDINGS, LAKE, ensureSafePosition, movePlayer, nearbyInteraction } from './world.js';
+import { AREA_ONE_SPAWN, BUILDINGS, LAKE, SAFE_SPAWN, ensureSafePosition, PortalEntryTracker, movePlayer, nearbyInteraction, type PortalKind } from './world.js';
 
 declare function acquireVsCodeApi<T = unknown>(): {
   postMessage(message: WebviewToHostMessage): void;
@@ -43,7 +56,13 @@ let lastFrame = performance.now();
 let lastAutoCatch = Date.now();
 let lastPositionSave = 0;
 let toastTimer = 0;
-let overlay: 'inventory' | 'market' | undefined;
+let overlay: 'inventory' | 'market' | 'rodShop' | 'equipmentShop' | 'blacksmith' | 'fishGuide' | 'catch' | 'fishingAreas' | undefined;
+let shopTab: 'rods' | 'bait' = 'rods';
+let equipmentTab: 'gear' | 'accessories' = 'gear';
+let blacksmithTab: 'rods' | 'gear' | 'accessories' = 'rods';
+let pendingFish: FishDefinition | undefined;
+let catchResult: { fish: FishDefinition; stored: boolean; material?: MaterialId } | undefined;
+const portalEntries = new PortalEntryTracker();
 let interaction = nearbyInteraction(state.player);
 
 const prompt = required<HTMLElement>('prompt');
@@ -51,10 +70,18 @@ const toast = required<HTMLElement>('toast');
 const fishingControls = required<HTMLElement>('fishingControls');
 const fishingStatus = required<HTMLElement>('fishingStatus');
 const fishingMeter = required<HTMLElement>('fishingMeter');
+const fishingTarget = required<HTMLElement>('fishingTarget');
+const fishingMarker = required<HTMLElement>('fishingMarker');
 const castButton = required<HTMLButtonElement>('castButton');
 const autoButton = required<HTMLButtonElement>('autoButton');
 const inventoryPanel = required<HTMLElement>('inventoryPanel');
 const marketPanel = required<HTMLElement>('marketPanel');
+const rodShopPanel = required<HTMLElement>('rodShopPanel');
+const equipmentShopPanel = required<HTMLElement>('equipmentShopPanel');
+const blacksmithPanel = required<HTMLElement>('blacksmithPanel');
+const fishGuidePanel = required<HTMLElement>('fishGuidePanel');
+const catchPanel = required<HTMLElement>('catchPanel');
+const fishingAreasPanel = required<HTMLElement>('fishingAreasPanel');
 const inactiveNotice = required<HTMLElement>('inactiveNotice');
 const characterPortrait = required<HTMLCanvasElement>('characterPortrait');
 const characterPortraitContext = characterPortrait.getContext('2d');
@@ -65,10 +92,25 @@ required('expandButton').addEventListener('click', () => {
   vscode.postMessage({ type: 'openFullscreen' });
 });
 required('inventoryButton').addEventListener('click', () => toggleInventory());
+required('blacksmithButton').addEventListener('click', () => openBlacksmith(false));
 required('resetButton').addEventListener('click', () => vscode.postMessage({ type: 'resetState' }));
 castButton.addEventListener('click', () => fishingAction());
 autoButton.addEventListener('click', () => toggleAuto());
 required('villageButton').addEventListener('click', () => enterVillage());
+required('continueFishingButton').addEventListener('click', () => continueManualFishing());
+required('areaOneButton').addEventListener('click', () => enterFishingAreaOne());
+document.querySelectorAll<HTMLButtonElement>('[data-shop-tab]').forEach((button) => button.addEventListener('click', () => {
+  shopTab = button.dataset.shopTab === 'bait' ? 'bait' : 'rods';
+  renderShopTabs();
+}));
+document.querySelectorAll<HTMLButtonElement>('[data-equipment-tab]').forEach((button) => button.addEventListener('click', () => {
+  equipmentTab = button.dataset.equipmentTab === 'accessories' ? 'accessories' : 'gear';
+  renderEquipmentShopTabs();
+}));
+document.querySelectorAll<HTMLButtonElement>('[data-blacksmith-tab]').forEach((button) => button.addEventListener('click', () => {
+  blacksmithTab = button.dataset.blacksmithTab as typeof blacksmithTab;
+  updateUi();
+}));
 required('sellAllButton').addEventListener('click', () => {
   const earned = sellAll(state);
   showToast(earned ? `Sold everything for ${earned} coins!` : 'Your fishing bag is empty.');
@@ -89,13 +131,18 @@ window.addEventListener('message', (event: MessageEvent<HostToWebviewMessage>) =
   }
   if (event.data.type !== 'loadState' && event.data.type !== 'resetState') return;
   state = sanitizeSave(event.data.state);
-  const safePosition = ensureSafePosition(state.player);
+  const safePosition = ensureSafePosition(state.player, state.location);
   const repairedPosition = safePosition.x !== state.player.x || safePosition.y !== state.player.y;
   state.player = { ...state.player, ...safePosition };
-  interaction = nearbyInteraction(state.player);
+  interaction = nearbyInteraction(state.player, state.location);
+  portalEntries.reset();
+  input.clear();
+  playerMoving = false;
   // Starting the clock here deliberately prevents closed-panel/offline rewards.
   lastAutoCatch = Date.now();
   fishing.reset();
+  pendingFish = undefined;
+  catchResult = undefined;
   overlay = undefined;
   initialized = true;
   vscode.setState(state);
@@ -120,12 +167,16 @@ const phaserGame = new CozyPhaserGame(canvas, playerSpriteUrl, {
   },
   snapshot: () => ({
     scene: state.scene,
+    location: state.location,
     player: { x: state.player.x, y: state.player.y },
     facing: playerFacing,
     moving: playerMoving,
     fishingPhase: fishing.phase,
     autoFishing: state.fishing.autoEnabled,
   }),
+  lakeClick: () => handleLakeClick(),
+  fishGuideClick: () => handleFishGuideClick(),
+  portalClick: () => handleFishingPortalClick(),
 });
 window.addEventListener('beforeunload', () => phaserGame.destroy(), { once: true });
 vscode.postMessage({ type: 'webviewReady' });
@@ -142,14 +193,56 @@ function frame(now: number): void {
 }
 
 function handleInput(): void {
-  if (input.consume('escape')) {
+  // Consume every action edge, including while a modal is open, so nothing fires later.
+  const escape = input.consume('escape');
+  const space = input.consume(' ');
+  const interactKey = input.consume('e');
+  const inventoryAlias = input.consume('i');
+  const auto = input.consume('f');
+  if (escape) {
+    if (overlay && overlay !== 'catch') {
+      closeOverlay();
+      return;
+    }
+    if (state.scene === 'fishing') {
+      enterVillage();
+      return;
+    }
     if (overlay) closeOverlay();
-    else if (state.scene === 'fishing') enterVillage();
+    return;
   }
-  if (input.consume('i')) toggleInventory();
+  if (overlay === 'catch') {
+    if (space) continueManualFishing();
+    return;
+  }
+  if (overlay === 'fishingAreas') return;
+  if (state.scene === 'village' && interactKey && nearbyInteraction(state.player, state.location)?.kind === 'rodShop') {
+    openRodShop();
+    return;
+  }
+  if (state.scene === 'village' && interactKey && nearbyInteraction(state.player, state.location)?.kind === 'equipmentShop') {
+    openEquipmentShop();
+    return;
+  }
+  if (state.scene === 'village' && interactKey && nearbyInteraction(state.player, state.location)?.kind === 'blacksmith') {
+    openBlacksmith(true);
+    return;
+  }
+  if (state.scene === 'village' && interactKey && nearbyInteraction(state.player, state.location)?.kind === 'fishGuide') {
+    openFishGuide();
+    return;
+  }
+  if (interactKey || inventoryAlias) {
+    toggleInventory();
+    return;
+  }
   if (overlay) return;
-  if (state.scene === 'village' && input.consume('e')) interact();
-  if (state.scene === 'fishing' && input.consume(' ')) fishingAction();
+  if (state.scene === 'village') {
+    if (space) interact();
+  } else {
+    if (space) fishingAction();
+    if (auto) toggleAuto();
+  }
 }
 
 function update(delta: number, now: number): void {
@@ -163,11 +256,12 @@ function update(delta: number, now: number): void {
       if (Math.abs(direction.x) > Math.abs(direction.y)) playerFacing = direction.x > 0 ? 'right' : 'left';
       else playerFacing = direction.y > 0 ? 'down' : 'up';
       const previousPosition = state.player;
-      const nextPosition = movePlayer(state.player, direction.x * 155 * delta, direction.y * 155 * delta);
+      const speed = 155 * (1 + equipmentBonus(state, 'speed'));
+      const nextPosition = movePlayer(state.player, direction.x * speed * delta, direction.y * speed * delta, state.location);
       playerMoving = Math.abs(nextPosition.x - previousPosition.x) > 0.01
         || Math.abs(nextPosition.y - previousPosition.y) > 0.01;
       state.player = { ...state.player, ...nextPosition };
-      interaction = nearbyInteraction(state.player);
+      interaction = nearbyInteraction(state.player, state.location);
       if (Date.now() - lastPositionSave > 1500) {
         lastPositionSave = Date.now();
         saveNow();
@@ -177,10 +271,17 @@ function update(delta: number, now: number): void {
     playerMoving = false;
   }
 
+  if (state.scene === 'village' && !overlay) {
+    const entered = portalEntries.update(state.player, state.location);
+    if (entered) activatePortal(entered);
+  }
+  updatePrompt();
+
   if (state.scene === 'fishing' && !state.fishing.autoEnabled) {
-    const event = fishing.update(now);
-    if (event === 'bite') showToast('A fish is biting! Reel it in!');
-    if (event === 'miss') showToast('The fish got away.');
+    if (fishing.update(now) === 'escape') {
+      pendingFish = undefined;
+      showToast('The fish got away!');
+    }
   }
 
   if (state.scene === 'fishing' && state.fishing.autoEnabled) {
@@ -197,21 +298,62 @@ function update(delta: number, now: number): void {
 function fishingAction(): void {
   if (overlay || state.scene !== 'fishing' || state.fishing.autoEnabled) return;
   const now = performance.now();
-  if (fishing.phase === 'bite') {
-    if (fishing.reel(now)) catchFish(false);
-  } else if (fishing.cast(now, Math.random)) {
-    updateFishingUi(now);
+  if (fishing.phase === 'waiting') {
+    const hookedFish = pendingFish;
+    pendingFish = undefined;
+    if (fishing.reel(now)) {
+      catchFish(false, hookedFish);
+    }
+    else {
+      showToast('Missed the catch zone - try again!');
+      updateFishingUi(now);
+    }
+  } else {
+    startManualRound(now);
   }
 }
 
-function catchFish(auto: boolean): void {
-  const fish = chooseFish(Math.random());
+function startManualRound(now: number): void {
+  const hookedFish = chooseFish(Math.random(), activeBait(state), equipmentBonus(state, 'luck'), state.equippedRod);
+  const rod = effectiveRodStats(state);
+  if (!fishing.cast(
+    now,
+    Math.random,
+    catchZoneWidth(hookedFish.rarity) + rod.zoneBonus + equipmentBonus(state, 'zone'),
+    markerCycleMs(hookedFish.rarity) + rod.cycleBonusMs,
+    escapeWindowMs(hookedFish.rarity) + rod.escapeBonusMs,
+  )) return;
+  consumeBait(state);
+  pendingFish = hookedFish;
+  updateFishingUi(now);
+  updateUi();
+  saveNow();
+}
+
+function catchFish(auto: boolean, hookedFish?: FishDefinition): void {
+  const fish = hookedFish ?? chooseFish(Math.random(), auto ? activeBait(state) : undefined, equipmentBonus(state, 'luck'), state.equippedRod);
+  if (auto) consumeBait(state);
   const result = awardCatch(state, fish);
+  const rod = effectiveRodStats(state);
+  if (!auto) {
+    catchResult = { fish, stored: result.stored, material: result.material };
+    overlay = 'catch';
+  }
   const prefix = auto ? 'Auto caught' : 'Caught';
-  showToast(result.stored ? `${prefix} a ${fish.name}! +${fish.xp} XP, +1 coin` : `${fish.name} released — bag full! XP and coin awarded.`);
+  const foundMaterial = result.material ? ` Found ${MATERIALS.find((item) => item.id === result.material)?.name}!` : '';
+  showToast(result.stored ? `${prefix} a ${fish.name}! +${fish.xp + rod.xpBonus + equipmentBonus(state, 'xp')} XP, +1 coin.${foundMaterial}` : `${fish.name} released — bag full! XP and coin awarded.`);
   if (result.leveled) window.setTimeout(() => showToast(`Level up! Player ${state.player.level} · Fishing ${state.fishing.level}`), 900);
   updateUi();
   saveNow();
+}
+
+function continueManualFishing(): void {
+  if (overlay !== 'catch' || state.scene !== 'fishing') return;
+  overlay = undefined;
+  catchResult = undefined;
+  updateUi();
+  startManualRound(performance.now());
+  canvas.focus();
 }
 
 function toggleAuto(): void {
@@ -219,46 +361,189 @@ function toggleAuto(): void {
   state.fishing.autoEnabled = !state.fishing.autoEnabled;
   lastAutoCatch = Date.now();
   fishing.reset();
+  pendingFish = undefined;
+  catchResult = undefined;
   showToast(state.fishing.autoEnabled ? 'Auto fishing started — one catch every 10 seconds.' : 'Auto fishing stopped.');
   updateUi();
   saveNow();
 }
 
 function interact(): void {
-  interaction = nearbyInteraction(state.player);
+  interaction = nearbyInteraction(state.player, state.location);
   if (!interaction) return;
   if (interaction.kind === 'lake') {
-    state.scene = 'fishing';
-    fishing.reset();
-    lastAutoCatch = Date.now();
-    updateUi();
-    saveNow();
-  } else if (interaction.kind === 'market') {
-    overlay = 'market';
-    updateUi();
+    // Space at the shore equips the rod and immediately starts the timing bar.
+    startFishing(true);
+  } else if (interaction.kind === 'fishingPortal') {
+    activatePortal('fishingPortal');
+  } else if (interaction.kind === 'returnPortal') {
+    activatePortal('returnPortal');
+  } else if (interaction.kind === 'fishGuide') {
+    openFishGuide();
+  } else if (interaction.kind === 'equipmentShop') {
+    openEquipmentShop();
+  } else if (interaction.kind === 'blacksmith') {
+    openBlacksmith(true);
   } else {
     showToast(interaction.label);
   }
+}
+
+function enterFishingAreaOne(): void {
+  if (overlay !== 'fishingAreas' || state.location !== 'hub') return;
+  teleportPlayer('area1', AREA_ONE_SPAWN, 'Entered Fishing Area 1.');
+}
+
+function handleFishingPortalClick(): void {
+  if (!initialized || !active || overlay || state.scene !== 'village') return;
+  interaction = nearbyInteraction(state.player, state.location);
+  if (interaction?.kind !== 'fishingPortal' && interaction?.kind !== 'returnPortal') {
+    showToast('Walk closer to the portal.');
+    return;
+  }
+  activatePortal(interaction.kind);
+}
+
+function activatePortal(kind: PortalKind): void {
+  if (overlay || state.scene !== 'village') return;
+  if (kind === 'fishingPortal' && state.location === 'hub') {
+    portalEntries.update(state.player, state.location);
+    overlay = 'fishingAreas';
+    playerMoving = false;
+    input.clear();
+    updateUi();
+    required('areaOneButton').focus();
+  } else if (kind === 'returnPortal' && state.location === 'area1') {
+    teleportPlayer('hub', SAFE_SPAWN, 'Returned to the village hub.');
+  }
+}
+
+function teleportPlayer(location: GameSaveV1['location'], destination: { x: number; y: number }, message: string): void {
+  state.scene = 'village';
+  state.location = location;
+  state.fishing.autoEnabled = false;
+  fishing.reset();
+  pendingFish = undefined;
+  catchResult = undefined;
+  overlay = undefined;
+  state.player = { ...state.player, ...ensureSafePosition(destination, location) };
+  interaction = nearbyInteraction(state.player, state.location);
+  portalEntries.reset();
+  input.clear();
+  playerMoving = false;
+  playerFacing = 'down';
+  updateUi();
+  saveNow();
+  showToast(message);
+  canvas.focus();
+}
+
+function handleLakeClick(): void {
+  if (overlay) return;
+  if (state.scene === 'fishing') {
+    fishingAction();
+    return;
+  }
+  interaction = nearbyInteraction(state.player, state.location);
+  if (interaction?.kind !== 'lake') {
+    showToast('Walk closer to the lake to fish.');
+    return;
+  }
+  startFishing(true);
+}
+
+function handleFishGuideClick(): void {
+  if (!initialized || !active || overlay || state.scene !== 'village' || state.location !== 'area1') return;
+  if (nearbyInteraction(state.player, state.location)?.kind !== 'fishGuide') {
+    showToast('Walk closer to the fish guide sign.');
+    return;
+  }
+  openFishGuide();
+}
+
+function startFishing(castImmediately: boolean): void {
+  if (state.location !== 'area1') return;
+  state.scene = 'fishing';
+  fishing.reset();
+  pendingFish = undefined;
+  catchResult = undefined;
+  lastAutoCatch = Date.now();
+  faceLake();
+  updateUi();
+  if (castImmediately) fishingAction();
+  saveNow();
+}
+
+function faceLake(): void {
+  const lakeCenterX = LAKE.x + LAKE.width / 2;
+  const lakeCenterY = LAKE.y + LAKE.height / 2;
+  const dx = lakeCenterX - state.player.x;
+  const dy = lakeCenterY - state.player.y;
+  playerFacing = Math.abs(dx) > Math.abs(dy)
+    ? (dx > 0 ? 'right' : 'left')
+    : (dy > 0 ? 'down' : 'up');
 }
 
 function enterVillage(): void {
   state.scene = 'village';
   state.fishing.autoEnabled = false;
   fishing.reset();
+  pendingFish = undefined;
+  catchResult = undefined;
   overlay = undefined;
-  interaction = nearbyInteraction(state.player);
+  interaction = nearbyInteraction(state.player, state.location);
   updateUi();
   saveNow();
   canvas.focus();
 }
 
 function toggleInventory(): void {
+  if (overlay === 'fishingAreas') return;
   overlay = overlay === 'inventory' ? undefined : 'inventory';
   updateUi();
 }
 
+function openRodShop(): void {
+  if (state.scene !== 'village' || state.location !== 'hub') return;
+  if (nearbyInteraction(state.player, state.location)?.kind !== 'rodShop') return;
+  overlay = 'rodShop';
+  input.clear();
+  updateUi();
+  rodShopPanel.querySelector<HTMLButtonElement>('button[data-close]')?.focus();
+}
+
+function openEquipmentShop(): void {
+  if (state.scene !== 'village' || state.location !== 'hub') return;
+  if (nearbyInteraction(state.player, state.location)?.kind !== 'equipmentShop') return;
+  overlay = 'equipmentShop';
+  input.clear();
+  updateUi();
+  equipmentShopPanel.querySelector<HTMLButtonElement>('button[data-close]')?.focus();
+}
+
+function openBlacksmith(requireNearby: boolean): void {
+  if (overlay === 'fishingAreas' || overlay === 'catch') return;
+  if (requireNearby && (state.scene !== 'village' || state.location !== 'hub'
+    || nearbyInteraction(state.player, state.location)?.kind !== 'blacksmith')) return;
+  overlay = overlay === 'blacksmith' ? undefined : 'blacksmith';
+  input.clear();
+  updateUi();
+  if (overlay === 'blacksmith') blacksmithPanel.querySelector<HTMLButtonElement>('button[data-close]')?.focus();
+  else canvas.focus();
+}
+
+function openFishGuide(): void {
+  if (state.scene !== 'village' || state.location !== 'area1') return;
+  if (nearbyInteraction(state.player, state.location)?.kind !== 'fishGuide') return;
+  overlay = 'fishGuide';
+  input.clear();
+  updateUi();
+  fishGuidePanel.querySelector<HTMLButtonElement>('button[data-close]')?.focus();
+}
+
 function closeOverlay(): void {
   overlay = undefined;
+  input.clear();
   updateUi();
   canvas.focus();
 }
@@ -270,6 +555,7 @@ function saveNow(): void {
 }
 
 function updateUi(): void {
+  required('mapName').textContent = MAPS[state.location].name;
   const playerThreshold = state.player.level * 100;
   const fishingThreshold = state.fishing.level * 75;
   const inventoryUsed = inventoryCount(state);
@@ -280,17 +566,51 @@ function updateUi(): void {
   required('fishingXpStat').textContent = `${state.fishing.xp} / ${fishingThreshold} XP`;
   required('fishingXpBar').style.width = `${Math.min(100, state.fishing.xp / fishingThreshold * 100)}%`;
   required('coinStat').textContent = String(state.coins);
-  required('bagStat').textContent = `${inventoryUsed}/${state.inventoryCapacity}`;
+  required('bagStat').textContent = `${inventoryUsed}/${effectiveInventoryCapacity(state)}`;
+  const bait = activeBait(state);
+  required('baitStatus').textContent = bait ? `${bait.name}: ${state.baitInventory[bait.id]} left · boosts ${bait.minRarity}+ fish` : 'No bait selected';
   fishingControls.classList.toggle('hidden', state.scene !== 'fishing' || Boolean(overlay));
   inventoryPanel.classList.toggle('hidden', overlay !== 'inventory');
   marketPanel.classList.toggle('hidden', overlay !== 'market');
-  prompt.classList.toggle('visible', state.scene === 'village' && !overlay && Boolean(interaction));
-  prompt.textContent = interaction?.label ?? '';
-  autoButton.textContent = `Auto Fish: ${state.fishing.autoEnabled ? 'On' : 'Off'}`;
+  rodShopPanel.classList.toggle('hidden', overlay !== 'rodShop');
+  equipmentShopPanel.classList.toggle('hidden', overlay !== 'equipmentShop');
+  blacksmithPanel.classList.toggle('hidden', overlay !== 'blacksmith');
+  fishGuidePanel.classList.toggle('hidden', overlay !== 'fishGuide');
+  catchPanel.classList.toggle('hidden', overlay !== 'catch');
+  fishingAreasPanel.classList.toggle('hidden', overlay !== 'fishingAreas');
+  updatePrompt();
+  autoButton.innerHTML = `Auto Fish: ${state.fishing.autoEnabled ? 'On' : 'Off'} <kbd>F</kbd>`;
   autoButton.classList.toggle('primary', state.fishing.autoEnabled);
-  castButton.disabled = state.fishing.autoEnabled || fishing.phase === 'waiting';
+  castButton.disabled = state.fishing.autoEnabled;
+  renderCatchResult();
   renderInventory();
   renderMarket();
+  renderRodShop();
+  renderBaitShop();
+  renderShopTabs();
+  renderEquipmentShop();
+  renderEquipmentShopTabs();
+  renderBlacksmith();
+  renderFishGuide();
+}
+
+function updatePrompt(): void {
+  prompt.classList.toggle('visible', state.scene === 'village' && !overlay && Boolean(interaction));
+  prompt.textContent = interaction?.label ?? '';
+}
+
+function renderCatchResult(): void {
+  if (!catchResult) return;
+  const { fish, stored, material } = catchResult;
+  required('caughtFishName').textContent = fish.name;
+  required('caughtFishRarity').textContent = fish.rarity;
+  required('caughtFishRarity').className = `rarity-${fish.rarity}`;
+  required('caughtFishValue').textContent = `${fish.value} coins`;
+  required('caughtFishXp').textContent = `+${fish.xp + effectiveRodStats(state).xpBonus + equipmentBonus(state, 'xp')} XP`;
+  required('caughtFishQuantity').textContent = stored ? `${state.inventory[fish.id]} stored` : 'Bag full';
+  required('caughtFishOutcome').textContent = stored
+    ? `Added to your inventory.${material ? ` Found ${MATERIALS.find((item) => item.id === material)?.name}!` : ''}`
+    : 'Released because your fishing bag is full.';
 }
 
 function updateFishingUi(now: number): void {
@@ -299,7 +619,9 @@ function updateFishingUi(now: number): void {
     const progress = Math.min(1, (Date.now() - lastAutoCatch) / 10_000);
     fishingStatus.textContent = `Auto fishing… next catch in ${Math.max(1, Math.ceil((10_000 - (Date.now() - lastAutoCatch)) / 1000))}s`;
     fishingMeter.style.width = `${progress * 100}%`;
-    castButton.textContent = 'Auto Fishing Active';
+    fishingTarget.style.opacity = '0';
+    fishingMarker.style.opacity = '0';
+    castButton.innerHTML = 'Auto Fishing Active <kbd>F</kbd>';
     return;
   }
   const labels = {
@@ -311,43 +633,100 @@ function updateFishingUi(now: number): void {
   };
   fishingStatus.textContent = labels[fishing.phase];
   if (fishing.phase === 'waiting') {
-    const total = fishing.biteAt - fishing.phaseStarted;
-    fishingMeter.style.width = `${Math.min(94, ((now - fishing.phaseStarted) / total) * 94)}%`;
-  } else if (fishing.phase === 'bite') {
-    fishingMeter.style.width = `${Math.max(0, 100 - ((now - fishing.phaseStarted) / 1200) * 100)}%`;
-  } else fishingMeter.style.width = '0%';
-  castButton.textContent = fishing.phase === 'bite' ? 'Reel Now! Space' : 'Cast Line Space';
-  castButton.disabled = fishing.phase === 'waiting';
+    const speed = pendingFish && ['Rare', 'Epic', 'Legendary'].includes(pendingFish.rarity) ? 'Fast marker. ' : 'Slow marker. ';
+    const rarity = pendingFish ? `${pendingFish.rarity} fish - ${speed}` : '';
+    const secondsLeft = Math.max(0, (fishing.escapeAfterMs - (now - fishing.phaseStarted)) / 1000).toFixed(1);
+    fishingStatus.textContent = `${rarity}${secondsLeft}s before it escapes. Press Space inside the catch zone!`;
+  } else if (fishing.phase === 'missed') {
+    fishingStatus.textContent = 'Missed the catch zone - press Space to try again.';
+  }
+  if (fishing.phase === 'waiting') {
+    fishingMeter.style.width = '0%';
+    fishingTarget.style.left = `${(fishing.targetCenter - fishing.targetWidth / 2) * 100}%`;
+    fishingTarget.style.width = `${fishing.targetWidth * 100}%`;
+    fishingTarget.style.opacity = '1';
+    fishingMarker.style.left = `${fishing.markerPosition(now) * 100}%`;
+    fishingMarker.style.opacity = '1';
+  } else {
+    fishingMeter.style.width = '0%';
+    fishingTarget.style.opacity = '0';
+    fishingMarker.style.opacity = '0';
+  }
+  castButton.innerHTML = fishing.phase === 'waiting'
+    ? 'Catch <kbd>Space</kbd>'
+    : 'Fish <kbd>Space</kbd>';
+  castButton.disabled = false;
 }
 
 function renderInventory(): void {
   const used = inventoryCount(state);
   required('characterLevel').textContent = String(state.player.level);
   required('characterFishing').textContent = String(state.fishing.level);
-  required('characterCapacity').textContent = String(state.inventoryCapacity);
-  required('inventoryUsage').textContent = `${used} / ${state.inventoryCapacity}`;
+  required('characterCapacity').textContent = String(effectiveInventoryCapacity(state));
+  required('inventoryUsage').textContent = `Fish ${used} / ${effectiveInventoryCapacity(state)}`;
   const loadout = EQUIPMENT.filter((item) => state.equipment[item.slot] === item.id).map((item) => item.name);
   required('characterLoadout').textContent = loadout.length ? loadout.join(' · ') : 'No equipment selected';
+  const equippedRod = RODS.find((rod) => rod.id === state.equippedRod);
+  required('equippedRodName').textContent = `${equippedRod?.name ?? 'Old Bamboo Pole'}${state.enhancements[state.equippedRod] ? ` +${state.enhancements[state.equippedRod]}` : ''}`;
   renderCharacterPortrait();
   renderEquipment();
-  required('inventoryList').innerHTML = FISH.map((fish) => fishRow(fish, false)).join('') || '<p>Your bag is empty.</p>';
+  const inventoryList = required('inventoryList');
+  const storedFish = FISH.filter((fish) => state.inventory[fish.id] > 0);
+  const unequippedItems = EQUIPMENT.filter((item) =>
+    state.ownedEquipment.includes(item.id) && state.equipment[item.slot] !== item.id);
+  const stockedBait = BAITS.filter((bait) => state.baitInventory[bait.id] > 0);
+  const foundMaterials = MATERIALS.filter((material) => state.materials[material.id] > 0);
+  inventoryList.innerHTML = [
+    ...unequippedItems.map((item) => `<button class="itemSlot inventoryEquipment" data-equip="${item.id}" aria-pressed="false" title="Equip ${item.name}">
+      <span class="equipmentItemIcon">${item.symbol}</span><strong>${item.name}${state.enhancements[item.id] ? ` +${state.enhancements[item.id]}` : ''}</strong><span class="itemRarity">${item.slot}</span><span class="inventoryAction">Equip</span>
+    </button>`),
+    ...stockedBait.map((bait) => `<button class="itemSlot inventoryBait" data-inventory-bait="${bait.id}" title="Select ${bait.name}">
+      <span class="itemIcon">&#x1FAB1;</span><strong>${bait.name}</strong><span class="itemRarity">${state.selectedBait === bait.id ? 'Selected' : 'Bait'}</span><b class="itemQuantity">${state.baitInventory[bait.id]}</b>
+    </button>`),
+    ...foundMaterials.map((material) => `<div class="itemSlot" title="Lake material for Blacksmith enhancements"><span class="equipmentItemIcon">${material.symbol}</span><strong>${material.name}</strong><span class="itemRarity">Material</span><b class="itemQuantity">${state.materials[material.id]}</b></div>`),
+    ...storedFish.map((fish) => fishRow(fish, false)),
+  ].join('') || '<p class="emptyInventory">No stored fish or unequipped equipment.</p>';
+  inventoryList.querySelectorAll<HTMLButtonElement>('[data-equip]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = button.dataset.equip as EquipmentItemId;
+      const item = EQUIPMENT.find((candidate) => candidate.id === id);
+      if (!item || !state.ownedEquipment.includes(id)) return;
+      state.equipment[item.slot] = id;
+      showToast(`${item.name} equipped.`);
+      updateUi();
+      saveNow();
+    });
+  });
+  inventoryList.querySelectorAll<HTMLButtonElement>('[data-inventory-bait]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.inventoryBait as BaitId;
+    if (!selectBait(state, id)) return;
+    showToast(`${BAITS.find((bait) => bait.id === id)?.name ?? 'Bait'} selected.`);
+    updateUi();
+    saveNow();
+  }));
 }
 
 function renderEquipment(): void {
   const grid = required('equipmentGrid');
-  grid.innerHTML = EQUIPMENT.map((item) => {
-    const equipped = state.equipment[item.slot] === item.id;
-    return `<button class="equipmentSlot slot-${item.slot} ${equipped ? 'equipped' : ''}" data-equip="${item.id}" aria-pressed="${equipped}">
-      <span class="slotSymbol">${item.symbol}</span><span class="slotCopy"><small>${item.slot}</small><strong>${item.name}</strong><em>${item.description}</em><span class="futureBonus">Future: ${item.futureBonus}</span></span><span class="equipState">${equipped ? 'Equipped' : 'Equip'}</span>
+  grid.innerHTML = '<div class="loadoutColumnTitle gearColumn">Gear</div><div class="loadoutColumnTitle accessoryColumn">Accessories</div>' + EQUIPMENT_SLOTS.map((slot) => {
+    const equippedId = state.equipment[slot];
+    const item = EQUIPMENT.find((candidate) => candidate.id === equippedId);
+    if (!item) return `<button class="equipmentSlot slot-${slot} empty" disabled aria-label="Empty ${slot} slot">
+      <span class="slotSymbol">+</span><span class="slotCopy"><strong>Empty ${slot}</strong></span>
     </button>`;
-  }).join('');
+    return `<button class="equipmentSlot slot-${slot} equipped" data-equip="${item.id}" aria-pressed="true" aria-label="Unequip ${item.name} from ${slot}" title="${item.bonusLabel ?? item.description} · Click to unequip">
+      <span class="slotSymbol">${item.symbol}</span><span class="slotCopy"><strong>${item.name}${state.enhancements[item.id] ? ` +${state.enhancements[item.id]}` : ''}</strong></span>
+    </button>`;
+  }).join('') + `<div class="equipmentSlot slot-bait selectedBaitSlot" title="Choose bait from Stored Items below">
+    <span class="slotSymbol">BA</span><span class="slotCopy"><strong>${activeBait(state)?.name ?? 'No Bait'}</strong></span>
+  </div>`;
   grid.querySelectorAll<HTMLButtonElement>('[data-equip]').forEach((button) => button.addEventListener('click', () => {
     const id = button.dataset.equip as EquipmentItemId;
     const item = EQUIPMENT.find((candidate) => candidate.id === id);
     if (!item || !state.ownedEquipment.includes(id)) return;
-    const unequipping = state.equipment[item.slot] === id;
-    state.equipment[item.slot] = unequipping ? null : id;
-    showToast(unequipping ? `${item.name} unequipped.` : `${item.name} equipped.`);
+    if (state.equipment[item.slot] !== id) return;
+    state.equipment[item.slot] = null;
+    showToast(`${item.name} moved to inventory.`);
     updateUi();
     saveNow();
   }));
@@ -372,6 +751,201 @@ function renderMarket(): void {
       saveNow();
     });
   });
+}
+
+function renderRodShop(): void {
+  required('shopCoinStat').textContent = String(state.coins);
+  const list = required('rodShopList');
+  list.innerHTML = RODS.map((rod) => {
+    const owned = state.ownedRods.includes(rod.id);
+    const equipped = state.equippedRod === rod.id;
+    const enhancement = state.enhancements[rod.id] ?? 0;
+    const action = equipped ? 'Equipped' : owned ? 'Equip' : `Buy · ${rod.price} coins`;
+    return `<div class="rodRow rarityBorder-${rod.grade}">
+      <div class="rodInfo"><strong>${rod.name}${state.enhancements[rod.id] ? ` +${state.enhancements[rod.id]}` : ''}</strong><span class="rarity-${rod.grade}">${rod.grade}</span>
+        <small>${rod.description}</small>
+        <small>Catch zone +${((rod.zoneBonus + enhancement * 0.005) * 100).toFixed(1)}% · Reel +${rod.cycleBonusMs + enhancement * 30} ms · Escape +${rod.escapeBonusMs + enhancement * 80} ms · Catch XP +${rod.xpBonus + enhancement}</small></div>
+      <button data-rod="${rod.id}" ${equipped || (!owned && state.coins < rod.price) ? 'disabled' : ''}>${action}</button>
+    </div>`;
+  }).join('');
+  list.querySelectorAll<HTMLButtonElement>('[data-rod]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.rod as RodId;
+    const rod = RODS.find((item) => item.id === id);
+    if (!rod) return;
+    if (state.ownedRods.includes(id)) {
+      if (equipRod(state, id)) showToast(`${rod.name} equipped.`);
+    } else {
+      const result = buyRod(state, id);
+      showToast(result === 'bought' ? `${rod.name} purchased and equipped!` : result === 'insufficient' ? 'Not enough gold coins.' : 'Rod unavailable.');
+    }
+    updateUi();
+    saveNow();
+  }));
+}
+
+function renderShopTabs(): void {
+  required('rodShopList').classList.toggle('hidden', shopTab !== 'rods');
+  required('baitShopList').classList.toggle('hidden', shopTab !== 'bait');
+  for (const [id, tab] of [['rodsTab', 'rods'], ['baitTab', 'bait']] as const) {
+    const button = required<HTMLButtonElement>(id);
+    button.setAttribute('aria-selected', String(shopTab === tab));
+    button.classList.toggle('primary', shopTab === tab);
+  }
+}
+
+function renderBaitShop(): void {
+  const list = required('baitShopList');
+  list.innerHTML = `<p class="baitNote">One bait is used per cast or auto catch. Bait improves the odds of rarer fish and does not guarantee a catch.</p>` +
+    BAITS.map((bait) => {
+      const stock = state.baitInventory[bait.id];
+      return `<div class="baitRow"><div class="baitInfo"><strong>${bait.name}</strong><small>${bait.rarityMultiplier}× encounter weight for ${bait.minRarity} and higher · ${stock} owned</small></div>
+        <button data-buy-bait="${bait.id}" ${state.coins < bait.price ? 'disabled' : ''}>Buy ${bait.packSize} · ${bait.price} coins</button>
+        <button data-select-bait="${bait.id}" ${stock === 0 || state.selectedBait === bait.id ? 'disabled' : ''}>${state.selectedBait === bait.id ? 'Selected' : 'Select'}</button></div>`;
+    }).join('') + `<button id="clearBaitButton" class="wide" ${state.selectedBait ? '' : 'disabled'}>Fish without bait</button>`;
+  list.querySelectorAll<HTMLButtonElement>('[data-buy-bait]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.buyBait as BaitId;
+    const bait = BAITS.find((item) => item.id === id);
+    const result = buyBait(state, id);
+    showToast(result === 'bought' ? `Bought ${bait?.packSize} ${bait?.name}!` : 'Not enough gold coins.');
+    updateUi();
+    saveNow();
+  }));
+  list.querySelectorAll<HTMLButtonElement>('[data-select-bait]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.selectBait as BaitId;
+    if (!selectBait(state, id)) return;
+    showToast(`${BAITS.find((bait) => bait.id === id)?.name ?? 'Bait'} selected.`);
+    updateUi();
+    saveNow();
+  }));
+  required<HTMLButtonElement>('clearBaitButton').addEventListener('click', () => {
+    selectBait(state, null);
+    updateUi();
+    saveNow();
+  });
+}
+
+function renderEquipmentShopTabs(): void {
+  required('gearShopList').classList.toggle('hidden', equipmentTab !== 'gear');
+  required('accessoryShopList').classList.toggle('hidden', equipmentTab !== 'accessories');
+  for (const [id, tab] of [['gearTab', 'gear'], ['accessoryTab', 'accessories']] as const) {
+    const button = required<HTMLButtonElement>(id);
+    button.setAttribute('aria-selected', String(equipmentTab === tab));
+    button.classList.toggle('primary', equipmentTab === tab);
+  }
+}
+
+function renderEquipmentShop(): void {
+  required('equipmentShopCoins').textContent = String(state.coins);
+  for (const [listId, accessories] of [['gearShopList', false], ['accessoryShopList', true]] as const) {
+    const list = required(listId);
+    const inCategory = (item: EquipmentDefinition): boolean =>
+      (item.slot === 'jewelry' || item.slot === 'ring' || item.slot === 'utility') === accessories;
+    list.innerHTML = GEAR_SETS.map((set) => {
+      const setItems = EQUIPMENT.filter((item) => item.setId === set.id);
+      const owned = setItems.filter((item) => state.ownedEquipment.includes(item.id)).length;
+      const equipped = setItems.filter((item) => state.equipment[item.slot] === item.id).length;
+      const remainingPrice = setItems.reduce((total, item) => total +
+        (state.ownedEquipment.includes(item.id) ? 0 : item.price ?? 0), 0);
+      const action = owned === setItems.length ? equipped === setItems.length ? 'Set Equipped' : 'Equip Set'
+        : `Buy Remaining · ${remainingPrice} coins`;
+      return `<section class="gearSetGroup rarityBorder-${set.grade}">
+        <div class="gearSetHeader"><div><strong class="rarity-${set.grade}">${set.name} Set · ${set.grade}</strong><small>${owned}/6 owned · ${equipped}/6 equipped · Full set: +${set.completionXpBonus} XP per catch</small></div>
+          <button data-shop-set="${set.id}" ${equipped === setItems.length || (remainingPrice > 0 && state.coins < remainingPrice) ? 'disabled' : ''}>${action}</button></div>
+        ${setItems.filter(inCategory).map(equipmentShopRow).join('')}
+      </section>`;
+    }).join('') + `<section class="gearSetGroup"><div class="gearSetHeader"><strong>Individual Items</strong></div>
+      ${EQUIPMENT.filter((item) => (item.price ?? 0) > 0 && !item.setId && inCategory(item)).map(equipmentShopRow).join('')}</section>`;
+    list.querySelectorAll<HTMLButtonElement>('[data-shop-set]').forEach((button) => button.addEventListener('click', () => {
+      const id = button.dataset.shopSet as GearSetId;
+      const set = GEAR_SETS.find((candidate) => candidate.id === id);
+      if (!set) return;
+      const allOwned = gearSetItems(id).every((itemId) => state.ownedEquipment.includes(itemId));
+      if (allOwned) {
+        if (equipGearSet(state, id)) showToast(`${set.name} set equipped!`);
+      } else {
+        const result = buyGearSet(state, id);
+        showToast(result === 'bought' ? `${set.name} set purchased and equipped!` : result === 'insufficient' ? 'Not enough gold coins.' : 'Set unavailable.');
+      }
+      updateUi();
+      saveNow();
+    }));
+    list.querySelectorAll<HTMLButtonElement>('[data-shop-equipment]').forEach((button) => button.addEventListener('click', () => {
+      const id = button.dataset.shopEquipment as EquipmentItemId;
+      const item = EQUIPMENT.find((candidate) => candidate.id === id);
+      if (!item) return;
+      if (state.ownedEquipment.includes(id)) {
+        state.equipment[item.slot] = id;
+        showToast(`${item.name} equipped.`);
+      } else {
+        const result = buyEquipment(state, id);
+        showToast(result === 'bought' ? `${item.name} purchased and equipped!` : result === 'insufficient' ? 'Not enough gold coins.' : 'Equipment unavailable.');
+      }
+      updateUi();
+      saveNow();
+    }));
+  }
+}
+
+function equipmentShopRow(item: EquipmentDefinition): string {
+  const owned = state.ownedEquipment.includes(item.id);
+  const equipped = state.equipment[item.slot] === item.id;
+  const action = equipped ? 'Equipped' : owned ? 'Equip' : `Buy · ${item.price} coins`;
+  return `<div class="equipmentShopRow"><span class="equipmentShopIcon">${item.symbol}</span>
+    <div class="equipmentShopInfo"><strong>${item.name}${state.enhancements[item.id] ? ` +${state.enhancements[item.id]}` : ''}</strong><small>${item.slot} · ${item.description}</small><em>${item.bonusLabel ?? ''}</em></div>
+    <button data-shop-equipment="${item.id}" ${equipped || (!owned && state.coins < (item.price ?? 0)) ? 'disabled' : ''}>${action}</button></div>`;
+}
+
+function renderBlacksmith(): void {
+  required('blacksmithResources').textContent = `Gold: ${state.coins} · ${MATERIALS.map((material) => `${material.name}: ${state.materials[material.id]}`).join(' · ')}`;
+  document.querySelectorAll<HTMLButtonElement>('[data-blacksmith-tab]').forEach((button) => {
+    const selected = button.dataset.blacksmithTab === blacksmithTab;
+    button.classList.toggle('primary', selected);
+    button.setAttribute('aria-selected', String(selected));
+  });
+  const gearSlots = ['head', 'torso', 'hands', 'feet'];
+  const items: { id: EnhanceableId; name: string; symbol: string; description: string }[] = blacksmithTab === 'rods'
+    ? RODS.filter((rod) => state.ownedRods.includes(rod.id)).map((rod) => ({
+      id: rod.id, name: rod.name, symbol: 'RD', description: 'Each level improves catch control and adds +1 XP per catch.',
+    }))
+    : EQUIPMENT.filter((item) => state.ownedEquipment.includes(item.id)
+      && (blacksmithTab === 'gear' ? gearSlots.includes(item.slot) : !gearSlots.includes(item.slot)))
+      .map((item) => ({
+        id: item.id, name: item.name, symbol: item.symbol,
+        description: item.bonusKind ? `Strengthens ${item.futureBonus.toLowerCase()} while equipped.` : 'Adds a small fishing bonus while equipped.',
+      }));
+  const list = required('blacksmithList');
+  list.innerHTML = items.map((item) => {
+    const level = state.enhancements[item.id] ?? 0;
+    const cost = enhancementCost(state, item.id);
+    const materials = cost ? Object.entries(cost.materials).map(([id, amount]) =>
+      `${amount} ${MATERIALS.find((material) => material.id === id)?.name}`).join(' · ') : '';
+    const affordable = cost && state.coins >= cost.coins && Object.entries(cost.materials).every(([id, amount]) =>
+      state.materials[id as MaterialId] >= amount);
+    return `<div class="equipmentShopRow"><span class="equipmentShopIcon">${item.symbol}</span>
+      <div class="equipmentShopInfo"><strong>${item.name} +${level}</strong><small>${item.description}</small><em>${cost ? `+${level + 1}: ${Math.round(enhancementChance(level + 1) * 100)}% success · ${cost.coins} coins · ${materials}` : 'Maximum enhancement reached'}</em></div>
+      <button data-enhance="${item.id}" ${affordable ? '' : 'disabled'}>${level >= MAX_ENHANCEMENT ? 'Maxed' : `Enhance +${level + 1}`}</button></div>`;
+  }).join('') || '<p class="emptyInventory">No owned items in this category yet.</p>';
+  list.querySelectorAll<HTMLButtonElement>('[data-enhance]').forEach((button) => button.addEventListener('click', () => {
+    const id = button.dataset.enhance as EnhanceableId;
+    const result = enhanceItem(state, id);
+    showToast(result === 'enhanced' ? `Enhancement successful! +${state.enhancements[id]}`
+      : result === 'failed' ? `Enhancement failed. Item stays at +${state.enhancements[id] ?? 0}; materials and coins were spent.`
+        : result === 'materials' ? 'Not enough lake materials.' : result === 'coins' ? 'Not enough gold coins.' : 'Cannot enhance this item.');
+    updateUi();
+    saveNow();
+  }));
+}
+
+function renderFishGuide(): void {
+  required('fishGuideProgress').textContent = `${state.discoveredFish.length} / ${FISH.length} discovered`;
+  required('fishGuideList').innerHTML = FISH.map((fish) => {
+    const discovered = state.discoveredFish.includes(fish.id);
+    return `<div class="fishGuideEntry ${discovered ? `rarityBorder-${fish.rarity}` : 'undiscovered'}" aria-label="${discovered ? fish.name : 'Unknown fish'}">
+      <span class="fishGuideIcon ${discovered ? '' : 'unknown'}" aria-hidden="true">&#x1F41F;</span>
+      <span class="fishGuideIdentity"><strong>${discovered ? fish.name : '???'}</strong><small class="${discovered ? `rarity-${fish.rarity}` : ''}">${discovered ? fish.rarity : 'Not yet caught'}</small></span>
+      <span class="fishGuideValue">${discovered ? `${fish.value} coins` : '???'}</span>
+    </div>`;
+  }).join('');
 }
 
 function fishRow(fish: FishDefinition, market: boolean): string {

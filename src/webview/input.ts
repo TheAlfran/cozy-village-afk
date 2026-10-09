@@ -5,12 +5,13 @@ export class InputManager {
   constructor(target: Window) {
     target.addEventListener('keydown', (event) => {
       const key = event.key.toLowerCase();
-      if (['w', 'a', 's', 'd', 'e', 'i', 'escape', ' '].includes(key)) event.preventDefault();
+      if (['w', 'a', 's', 'd', 'e', 'f', 'i', 'escape', ' '].includes(key)) event.preventDefault();
+      if (event.repeat) return;
       if (!this.held.has(key)) this.pressed.add(key);
       this.held.add(key);
     });
     target.addEventListener('keyup', (event) => this.held.delete(event.key.toLowerCase()));
-    target.addEventListener('blur', () => this.held.clear());
+    target.addEventListener('blur', () => this.clear());
   }
 
   isHeld(key: string): boolean { return this.held.has(key); }
